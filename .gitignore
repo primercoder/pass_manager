@@ -1,6 +1,5 @@
 build/
 *.o
-key/*.key
 passwords.db
 passwords.db-wal
 passwords.db-shm
