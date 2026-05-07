@@ -1,0 +1,13 @@
+build/
+*.o
+key/*.key
+passwords.db
+passwords.db-wal
+passwords.db-shm
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+compile_commands.json
