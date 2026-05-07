@@ -23,21 +23,6 @@ static void setEcho(bool enable) {
     tcsetattr(STDIN_FILENO, TCSANOW, &tty);
 }
 
-static void setRawMode(bool enable) {
-    if (!isatty(STDIN_FILENO)) return;
-    static struct termios saved;
-    if (enable) {
-        tcgetattr(STDIN_FILENO, &saved);
-        struct termios raw = saved;
-        raw.c_lflag &= ~(ICANON | ECHO);
-        raw.c_cc[VMIN] = 1;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    } else {
-        tcsetattr(STDIN_FILENO, TCSANOW, &saved);
-    }
-}
-
 static void getPasswordInput(const std::string& prompt, std::string& out) {
     std::cout << prompt;
     std::cout.flush();
@@ -45,22 +30,6 @@ static void getPasswordInput(const std::string& prompt, std::string& out) {
     std::getline(std::cin, out);
     setEcho(true);
     std::cout << std::endl;
-}
-
-static bool isInteractive() {
-    static bool tty = isatty(STDIN_FILENO);
-    return tty;
-}
-
-static void pauseForEnter(const std::string& msg = "Press Enter to continue...") {
-    if (!isInteractive()) {
-        std::cout << msg << "\n";
-        return;
-    }
-    std::cout << msg;
-    std::cout.flush();
-    std::string dummy;
-    std::getline(std::cin, dummy);
 }
 
 static bool inputAvailable() {
@@ -82,7 +51,7 @@ bool CLI::loadKeyFile(const std::string& path) {
         keyLoaded_ = true;
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "\n[ERROR] Failed to load key file: " << e.what() << std::endl;
+        std::cerr << "[ERROR] Failed to load key file: " << e.what() << std::endl;
         keyLoaded_ = false;
         return false;
     }
@@ -92,8 +61,8 @@ bool CLI::doAdd(const std::string& name,
                 const std::string& desc,
                 const std::string& account,
                 const std::string& password) {
-    if (name.empty() || password.empty()) {
-        std::cerr << "[ERROR] Name and password are required.\n";
+    if (name.empty()) {
+        std::cerr << "[ERROR] Name is required.\n";
         return false;
     }
 
@@ -103,9 +72,24 @@ bool CLI::doAdd(const std::string& name,
         return false;
     }
 
+    std::string pwd = password;
+    if (pwd.empty()) {
+        std::string confirm;
+        while (true) {
+            getPasswordInput("Password: ", pwd);
+            if (pwd.empty()) {
+                std::cerr << "[ERROR] Password cannot be empty.\n";
+                return false;
+            }
+            getPasswordInput("Confirm:  ", confirm);
+            if (pwd == confirm) break;
+            std::cerr << "[ERROR] Passwords do not match.\n\n";
+        }
+    }
+
     std::string encrypted;
     try {
-        encrypted = Crypto::encrypt(aesKey_, password);
+        encrypted = Crypto::encrypt(aesKey_, pwd);
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Encryption failed: " << e.what() << "\n";
         return false;
@@ -140,8 +124,12 @@ bool CLI::doRemove(const std::string& name, const std::string& password) {
         return false;
     }
 
-    if (password != stored) {
-        std::cerr << "[ERROR] Password verification failed. Deletion aborted.\n";
+    std::string verify = password;
+    if (verify.empty()) {
+        getPasswordInput("Verify password: ", verify);
+    }
+    if (verify != stored) {
+        std::cerr << "[ERROR] Password does not match. Deletion aborted.\n";
         return false;
     }
 
@@ -150,7 +138,7 @@ bool CLI::doRemove(const std::string& name, const std::string& password) {
         return false;
     }
 
-    std::cout << "[OK] Password '" << name << "' removed.\n";
+    std::cout << "[OK] Password '" << name << "' deleted.\n";
     return true;
 }
 
@@ -162,7 +150,7 @@ bool CLI::doShow(const std::string& name, bool reveal) {
 
     auto results = db_.searchPasswords(name);
     if (results.empty()) {
-        std::cerr << "[NOT FOUND] No password matching '" << name << "'.\n";
+        std::cout << "[NOT FOUND] No password matching '" << name << "'.\n";
         return false;
     }
 
@@ -195,46 +183,25 @@ bool CLI::doList() {
         return true;
     }
 
-    std::cout << std::left
-              << std::setw(4) << "No."
-              << std::setw(22) << "Name"
-              << std::setw(22) << "Account"
+    std::cout << "\n";
+    std::cout << std::setw(4) << "No."
+              << "  " << std::left << std::setw(22) << "Name"
+              << std::setw(24) << "Description"
               << std::setw(22) << "Created"
-              << "Description\n";
+              << "Updated\n";
     std::cout << std::string(90, '-') << "\n";
 
     for (size_t i = 0; i < results.size(); ++i) {
         std::string desc = results[i].description;
-        if (desc.length() > 18) {
-            desc = desc.substr(0, 15) + "...";
-        }
-        std::cout << std::left
-                  << std::setw(4) << (i + 1)
-                  << std::setw(22) << results[i].name.substr(0, 21)
-                  << std::setw(22) << results[i].account.substr(0, 21)
+        if (desc.length() > 21) desc = desc.substr(0, 18) + "...";
+        std::cout << std::setw(4) << (i + 1)
+                  << "  " << std::left << std::setw(22) << results[i].name.substr(0, 21)
+                  << std::setw(24) << desc
                   << std::setw(22) << results[i].createdAt
-                  << desc << "\n";
+                  << results[i].updatedAt << "\n";
     }
 
     std::cout << "\nTotal: " << results.size() << " password(s)\n";
-    return true;
-}
-
-bool CLI::doCount() {
-    int count = db_.getPasswordCount();
-    std::cout << "Total passwords stored: " << count << "\n";
-
-    auto results = db_.listAllPasswords();
-    if (!results.empty()) {
-        std::cout << "\nPassword names:\n";
-        for (size_t i = 0; i < results.size(); ++i) {
-            std::cout << "  " << (i + 1) << ". " << results[i].name;
-            if (!results[i].description.empty()) {
-                std::cout << " -- " << results[i].description;
-            }
-            std::cout << "\n";
-        }
-    }
     return true;
 }
 
@@ -262,18 +229,23 @@ bool CLI::doEdit(const std::string& name,
         return false;
     }
 
-    if (oldPassword != stored) {
+    std::string verify = oldPassword;
+    if (verify.empty()) {
+        getPasswordInput("Verify original password: ", verify);
+    }
+    if (verify != stored) {
         std::cerr << "[ERROR] Original password verification failed.\n";
         return false;
     }
 
     std::string desc = newDesc.empty() ? entry->description : newDesc;
     std::string account = newAccount.empty() ? entry->account : newAccount;
+    std::string pwd = newPassword;
 
     std::string encrypted;
-    if (!newPassword.empty()) {
+    if (!pwd.empty()) {
         try {
-            encrypted = Crypto::encrypt(aesKey_, newPassword);
+            encrypted = Crypto::encrypt(aesKey_, pwd);
         } catch (const std::exception& e) {
             std::cerr << "[ERROR] Encryption failed: " << e.what() << "\n";
             return false;
@@ -292,14 +264,26 @@ bool CLI::doEdit(const std::string& name,
 }
 
 void CLI::printHeader() {
-    std::cout << "\n\033[1;36m"
+    std::cout << "\033[1;36m"
               << "╔══════════════════════════════════╗\n"
               << "║        PASSWORD MANAGER          ║\n"
               << "╚══════════════════════════════════╝\033[0m\n";
 }
 
 void CLI::printKeyStatus() {
-    std::cout << "Key file: " << keyPath_ << std::endl;
+    std::cout << "Key: " << keyPath_ << std::endl;
+}
+
+void CLI::printHelp() {
+    std::cout << "\n";
+    std::cout << "  add      Add a new password\n";
+    std::cout << "  delete   Delete a password\n";
+    std::cout << "  show     Search and reveal a password\n";
+    std::cout << "  list     List all passwords with details\n";
+    std::cout << "  edit     Edit a password\n";
+    std::cout << "  key      Change key file\n";
+    std::cout << "  help     Show this help\n";
+    std::cout << "  exit     Quit the program\n";
 }
 
 void CLI::run() {
@@ -309,60 +293,41 @@ void CLI::run() {
         return;
     }
 
-    std::string choice;
+    printHeader();
+    printKeyStatus();
+    printHelp();
+
+    std::string cmd;
     while (inputAvailable()) {
-        printHeader();
-        printKeyStatus();
-        std::cout << "\n";
-        std::cout << "  1. Add Password        (新增密码)\n";
-        std::cout << "  2. Remove Password     (移除密码)\n";
-        std::cout << "  3. Show Password       (查询密码)\n";
-        std::cout << "  4. List All Passwords  (密码列表)\n";
-        std::cout << "  5. Password Count      (密码数量)\n";
-        std::cout << "  6. Edit Password       (修改密码)\n";
-        std::cout << "  7. Change Key File     (更换密钥)\n";
-        std::cout << "  0. Exit                (退出)\n";
-        std::cout << "\n";
-        std::cout << "Choice: ";
-        std::cout.flush();
+        std::cout << "\npass_manager> " << std::flush;
+        if (!std::getline(std::cin, cmd)) break;
+        if (cmd.empty()) continue;
 
-        if (!std::getline(std::cin, choice)) {
-            break;
-        }
-
-        if (choice == "1") {
-            menuAdd();
-        } else if (choice == "2") {
-            menuRemove();
-        } else if (choice == "3") {
-            menuShow();
-        } else if (choice == "4") {
-            menuList();
-        } else if (choice == "5") {
-            menuCount();
-        } else if (choice == "6") {
-            menuEdit();
-        } else if (choice == "7") {
-            menuChangeKey();
-        } else if (choice == "0") {
-            std::cout << "\nGoodbye.\n" << std::endl;
+        if (cmd == "add") {
+            cmdAdd();
+        } else if (cmd == "delete" || cmd == "remove") {
+            cmdDelete();
+        } else if (cmd == "show") {
+            cmdShow();
+        } else if (cmd == "list") {
+            cmdList();
+        } else if (cmd == "edit") {
+            cmdEdit();
+        } else if (cmd == "key") {
+            cmdKey();
+        } else if (cmd == "help") {
+            printHelp();
+        } else if (cmd == "exit" || cmd == "quit") {
+            std::cout << "Goodbye.\n" << std::endl;
             break;
         } else {
-            std::cout << "\n[ERROR] Invalid choice.";
-            pauseForEnter();
+            std::cout << "Unknown command: " << cmd
+                      << " (type 'help' for commands)\n";
         }
     }
 }
 
 std::string CLI::readLine(const std::string& prompt) {
-    std::cout << prompt;
-    std::cout.flush();
-    std::string line;
-    std::getline(std::cin, line);
-    return line;
-}
-
-std::string CLI::readOptionalLine(const std::string& prompt) {
     std::cout << prompt;
     std::cout.flush();
     std::string line;
@@ -394,430 +359,254 @@ bool CLI::copyToClipboard(const std::string& text) {
     return false;
 }
 
-std::string CLI::encryptPassword(const std::string& password) {
-    return Crypto::encrypt(aesKey_, password);
-}
-
-std::string CLI::decryptPassword(const std::string& encrypted) {
-    return Crypto::decrypt(aesKey_, encrypted);
-}
-
-void CLI::menuAdd() {
-    printHeader();
-    std::cout << "=== Add Password ===\n\n";
-
-    std::string name = readLine("Name (required, unique): ");
+void CLI::cmdAdd() {
+    std::string name = readLine("  Name: ");
     if (name.empty()) {
-        std::cout << "\n[ERROR] Name is required.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] Name is required.\n";
         return;
     }
 
     auto existing = db_.getPassword(name);
     if (existing.has_value()) {
-        std::cout << "\n[ERROR] A password with name '" << name
-                  << "' already exists.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] '" << name << "' already exists.\n";
         return;
     }
 
-    std::string description = readOptionalLine("Description (optional): ");
-    std::string account = readOptionalLine("Account (optional): ");
+    std::string desc, account;
+    std::cout << "  Description: " << std::flush;
+    std::getline(std::cin, desc);
+    std::cout << "  Account: " << std::flush;
+    std::getline(std::cin, account);
 
-    std::string password, confirmPassword;
+    std::string password, confirm;
     while (inputAvailable()) {
-        password = readPassword("Password (required, input hidden): ");
+        getPasswordInput("  Password: ", password);
         if (password.empty()) {
             std::cout << "[ERROR] Password cannot be empty.\n";
             continue;
         }
-        confirmPassword = readPassword("Confirm password: ");
-        if (password == confirmPassword) {
-            break;
-        }
-        std::cout << "[ERROR] Passwords do not match. Please try again.\n\n";
+        getPasswordInput("  Confirm:  ", confirm);
+        if (password == confirm) break;
+        std::cout << "[ERROR] Passwords do not match.\n\n";
     }
 
     std::string encrypted;
     try {
         encrypted = Crypto::encrypt(aesKey_, password);
     } catch (const std::exception& e) {
-        std::cerr << "\n[ERROR] Encryption failed: " << e.what() << std::endl;
-        pauseForEnter();
+        std::cerr << "[ERROR] Encryption failed: " << e.what() << std::endl;
         return;
     }
 
-    if (db_.addPassword(name, description, account, encrypted)) {
-        std::cout << "\n[OK] Password '" << name << "' added successfully.\n";
+    if (db_.addPassword(name, desc, account, encrypted)) {
+        std::cout << "[OK] '" << name << "' added.\n";
     } else {
-        std::cout << "\n[ERROR] Failed to add password to database.\n";
+        std::cout << "[ERROR] Failed to add password.\n";
     }
-
-    pauseForEnter();
 }
 
-void CLI::menuRemove() {
-    printHeader();
-    std::cout << "=== Remove Password ===\n\n";
-    std::cout << "You must enter the password to confirm deletion.\n\n";
-
-    std::string name = readLine("Password name to remove: ");
+void CLI::cmdDelete() {
+    std::string name = readLine("  Name: ");
     if (name.empty()) {
-        std::cout << "\n[ERROR] Name is required.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] Name is required.\n";
         return;
     }
 
     auto entry = db_.getPassword(name);
     if (!entry.has_value()) {
-        std::cout << "\n[ERROR] No password found with name '" << name << "'.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] No password found: '" << name << "'.\n";
         return;
     }
 
-    std::string storedPassword;
+    std::string stored;
     try {
-        storedPassword = Crypto::decrypt(aesKey_, entry->passwordEncrypted);
+        stored = Crypto::decrypt(aesKey_, entry->passwordEncrypted);
     } catch (const std::exception& e) {
-        std::cerr << "\n[ERROR] Failed to decrypt password: " << e.what() << std::endl;
-        pauseForEnter();
+        std::cerr << "[ERROR] Decryption failed: " << e.what() << std::endl;
         return;
     }
 
-    std::string confirmPassword = readPassword(
-        "Enter the current password to confirm deletion: ");
-
-    if (confirmPassword != storedPassword) {
-        std::cout << "\n[ERROR] Password does not match. Deletion aborted.\n";
-        pauseForEnter();
+    std::string verify = readPassword("  Verify password: ");
+    if (verify != stored) {
+        std::cout << "[ERROR] Password does not match. Deletion aborted.\n";
         return;
     }
 
     if (db_.removePassword(name)) {
-        std::cout << "\n[OK] Password '" << name << "' removed successfully.\n";
+        std::cout << "[OK] '" << name << "' deleted.\n";
     } else {
-        std::cout << "\n[ERROR] Failed to remove password.\n";
+        std::cout << "[ERROR] Failed to delete password.\n";
     }
-
-    pauseForEnter();
 }
 
 void CLI::printPasswordDetail(const PasswordEntry& entry,
                               const std::string& decryptedPassword,
                               bool showPassword) {
     std::cout << "\n";
-    std::cout << "┌─────────────────────────────────────────┐\n";
-    std::cout << "│ " << std::left << std::setw(39) << entry.name << "│\n";
-    std::cout << "├─────────────────────────────────────────┤\n";
+    std::cout << "  ┌────────────────────────────────────────┐\n";
+    std::cout << "  │ " << std::left << std::setw(40) << entry.name << "│\n";
+    std::cout << "  ├────────────────────────────────────────┤\n";
     if (!entry.account.empty()) {
-        std::cout << "│ Account:    " << std::left << std::setw(28)
+        std::cout << "  │ Account:  " << std::left << std::setw(28)
                   << entry.account << "│\n";
     }
     if (!entry.description.empty()) {
-        std::cout << "│ Desc:       " << std::left << std::setw(28)
+        std::cout << "  │ Desc:     " << std::left << std::setw(28)
                   << entry.description << "│\n";
     }
-    std::cout << "│ Created:    " << std::left << std::setw(28)
+    std::cout << "  │ Created:  " << std::left << std::setw(28)
               << entry.createdAt << "│\n";
-    std::cout << "│ Updated:    " << std::left << std::setw(28)
+    std::cout << "  │ Updated:  " << std::left << std::setw(28)
               << entry.updatedAt << "│\n";
     if (showPassword) {
-        std::cout << "│ Password:   " << std::left << std::setw(28)
+        std::cout << "  │ Password: " << std::left << std::setw(28)
                   << decryptedPassword << "│\n";
     } else {
-        std::cout << "│ Password:   " << std::left << std::setw(28)
+        std::cout << "  │ Password: " << std::left << std::setw(28)
                   << "******** (hidden)" << "│\n";
     }
-    std::cout << "└─────────────────────────────────────────┘\n";
+    std::cout << "  └────────────────────────────────────────┘\n";
 }
 
-std::string CLI::searchPasswordName() {
-    if (!isInteractive()) {
-        return readLine("Enter password name (partial OK): ");
-    }
+void CLI::cmdShow() {
+    std::string search = readLine("  Search: ");
+    if (search.empty()) return;
 
-    std::cout << "  Enter password name (ESC to cancel)\n";
-    std::cout << "  > " << std::flush;
-
-    std::cout << "\033[s" << std::flush;
-
-    std::string buffer;
-    setRawMode(true);
-
-    while (true) {
-        int ch = std::cin.get();
-
-        if (ch == 27) {
-            setRawMode(false);
-            std::cout << "\033[u\033[J\n[CANCELLED]\n";
-            return "";
-        }
-
-        if (ch == '\n' || ch == '\r') {
-            break;
-        }
-
-        if (ch == 127 || ch == '\b') {
-            if (!buffer.empty()) {
-                buffer.pop_back();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            buffer += static_cast<char>(ch);
-        } else {
-            continue;
-        }
-
-        std::cout << "\r> ";
-        std::cout << "\033[K";
-        std::cout << buffer << std::flush;
-
-        std::cout << "\n\033[J";
-
-        if (!buffer.empty()) {
-            auto results = db_.searchPasswords(buffer);
-            int count = static_cast<int>(results.size());
-            int show = std::min(10, count);
-
-            if (show > 0) {
-                std::cout << "  \033[90m── matches (" << count << ") ──\033[0m\n";
-                for (int i = 0; i < show; ++i) {
-                    std::cout << "  " << std::setw(3) << (i + 1) << ". "
-                              << std::left << std::setw(22) << results[static_cast<size_t>(i)].name;
-                    if (!results[static_cast<size_t>(i)].account.empty()) {
-                        std::cout << "(" << results[static_cast<size_t>(i)].account << ")";
-                    }
-                    std::cout << "\033[K\n";
-                }
-                if (count > 10) {
-                    std::cout << "  \033[90m... and " << (count - 10)
-                              << " more (type to narrow)\033[0m\033[K\n";
-                }
-            } else {
-                std::cout << "  \033[90m(no matches)\033[0m\033[K\n";
-            }
-        }
-
-        std::cout << "\033[u" << std::flush;
-        std::cout << buffer << std::flush;
-    }
-
-    setRawMode(false);
-
-    std::cout << "\033[u\033[J";
-    std::cout << buffer << "\n" << std::flush;
-
-    return buffer;
-}
-
-void CLI::menuShow() {
-    printHeader();
-    std::cout << "=== Show Password ===\n\n";
-
-    std::string partial = searchPasswordName();
-    if (partial.empty()) {
-        pauseForEnter();
-        return;
-    }
-
-    auto results = db_.searchPasswords(partial);
+    auto results = db_.searchPasswords(search);
     if (results.empty()) {
-        std::cout << "\n[NOT FOUND] No password matching '" << partial << "'.\n";
-        pauseForEnter();
+        std::cout << "[NOT FOUND] No matches for '" << search << "'.\n";
         return;
     }
 
     const PasswordEntry* selected = nullptr;
+    std::string currentSearch = search;
 
-    if (results.size() == 1) {
-        selected = &results[0];
-    } else {
-        std::cout << "\nFound " << results.size() << " matching passwords:\n\n";
-        std::cout << std::left
-                  << std::setw(4) << "No."
-                  << std::setw(25) << "Name"
-                  << std::setw(25) << "Account"
-                  << "Description\n";
-        std::cout << std::string(78, '-') << "\n";
+    while (!selected) {
+        if (results.size() == 1) {
+            selected = &results[0];
+            break;
+        }
 
+        std::cout << "\n  " << results.size() << " matches:\n\n";
         for (size_t i = 0; i < results.size(); ++i) {
-            std::string desc = results[i].description;
-            if (desc.length() > 20) {
-                desc = desc.substr(0, 17) + "...";
-            }
-            std::cout << std::left
-                      << std::setw(4) << (i + 1)
-                      << std::setw(25) << results[i].name.substr(0, 24)
-                      << std::setw(25) << results[i].account.substr(0, 24)
-                      << desc << "\n";
-        }
-        std::cout << "\n";
-
-        std::string sel = readLine("Select a number (0 to cancel): ");
-        int idx = 0;
-        try {
-            idx = std::stoi(sel);
-        } catch (...) {
-            idx = 0;
-        }
-
-        if (idx < 1 || static_cast<size_t>(idx) > results.size()) {
-            std::cout << "\n[CANCELLED] Selection cancelled.\n";
-            pauseForEnter();
-            return;
-        }
-        selected = &results[static_cast<size_t>(idx - 1)];
-    }
-
-    std::string decryptedPassword;
-    try {
-        decryptedPassword = Crypto::decrypt(aesKey_,
-                                            selected->passwordEncrypted);
-    } catch (const std::exception& e) {
-        std::cerr << "\n[ERROR] Failed to decrypt password: "
-                  << e.what() << std::endl;
-        std::cerr << "The key file may have changed since this password was stored.\n";
-        pauseForEnter();
-        return;
-    }
-
-    std::string showChoice = readLine("\nShow password in plaintext? (y/N): ");
-    bool showPassword = (showChoice == "y" || showChoice == "Y");
-
-    printPasswordDetail(*selected, decryptedPassword, showPassword);
-
-    if (copyToClipboard(decryptedPassword)) {
-        std::cout << "\n[OK] Password copied to clipboard.";
-    } else {
-        std::cout << "\n[WARN] Could not copy to clipboard (xclip/wl-copy not found).";
-    }
-
-    pauseForEnter("\n\nPress Enter to continue...");
-}
-
-void CLI::menuList() {
-    printHeader();
-    std::cout << "=== Password List ===\n\n";
-
-    auto results = db_.listAllPasswords();
-    if (results.empty()) {
-        std::cout << "No passwords stored yet.\n";
-        pauseForEnter("\nPress Enter to continue...");
-        return;
-    }
-
-    std::cout << std::left
-              << std::setw(4) << "No."
-              << std::setw(22) << "Name"
-              << std::setw(22) << "Account"
-              << std::setw(22) << "Created"
-              << "Description\n";
-    std::cout << std::string(90, '-') << "\n";
-
-    for (size_t i = 0; i < results.size(); ++i) {
-        std::string desc = results[i].description;
-        if (desc.length() > 18) {
-            desc = desc.substr(0, 15) + "...";
-        }
-        std::cout << std::left
-                  << std::setw(4) << (i + 1)
-                  << std::setw(22) << results[i].name.substr(0, 21)
-                  << std::setw(22) << results[i].account.substr(0, 21)
-                  << std::setw(22) << results[i].createdAt
-                  << desc << "\n";
-    }
-
-    std::cout << "\nTotal: " << results.size() << " password(s)\n";
-    pauseForEnter("\nPress Enter to continue...");
-}
-
-void CLI::menuCount() {
-    printHeader();
-    std::cout << "=== Password Count ===\n\n";
-
-    int count = db_.getPasswordCount();
-    std::cout << "Total passwords stored: " << count << "\n";
-
-    auto results = db_.listAllPasswords();
-    if (!results.empty()) {
-        std::cout << "\nPassword names:\n";
-        for (size_t i = 0; i < results.size(); ++i) {
-            std::cout << "  " << (i + 1) << ". " << results[i].name;
-            if (!results[i].description.empty()) {
-                std::cout << " -- " << results[i].description;
+            std::cout << "  " << std::setw(3) << (i + 1) << ". "
+                      << std::left << std::setw(22) << results[i].name;
+            if (!results[i].account.empty()) {
+                std::cout << "(" << results[i].account << ")";
             }
             std::cout << "\n";
         }
+
+        std::cout << "\n  Select number, or type to narrow search";
+        std::cout << " [" << currentSearch << "]: " << std::flush;
+
+        std::string input;
+        std::getline(std::cin, input);
+
+        if (input.empty()) return;
+
+        int num = 0;
+        bool isNum = true;
+        try {
+            num = std::stoi(input);
+        } catch (...) {
+            isNum = false;
+        }
+
+        if (isNum && num >= 1 && static_cast<size_t>(num) <= results.size()) {
+            selected = &results[static_cast<size_t>(num - 1)];
+            break;
+        }
+
+        currentSearch += input;
+        results = db_.searchPasswords(currentSearch);
+        if (results.empty()) {
+            std::cout << "[NOT FOUND] No matches for '" << currentSearch << "'.\n";
+            currentSearch = search;
+            results = db_.searchPasswords(search);
+        }
     }
 
-    pauseForEnter("\nPress Enter to continue...");
+    std::string decrypted;
+    try {
+        decrypted = Crypto::decrypt(aesKey_, selected->passwordEncrypted);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Decrypt failed: " << e.what() << std::endl;
+        std::cerr << "The key file may have changed.\n";
+        return;
+    }
+
+    std::string showChoice = readLine("\n  Show password? (y/N): ");
+    bool showPassword = (showChoice == "y" || showChoice == "Y");
+
+    printPasswordDetail(*selected, decrypted, showPassword);
+
+    if (copyToClipboard(decrypted)) {
+        std::cout << "[OK] Password copied to clipboard.\n";
+    } else {
+        std::cout << "[WARN] Clipboard not available.\n";
+    }
 }
 
-void CLI::menuEdit() {
-    printHeader();
-    std::cout << "=== Edit Password ===\n\n";
-    std::cout << "You must enter the original password to confirm changes.\n\n";
+void CLI::cmdList() {
+    doList();
+}
 
-    std::string name = readLine("Password name to edit: ");
+void CLI::cmdEdit() {
+    std::string name = readLine("  Name: ");
     if (name.empty()) {
-        std::cout << "\n[ERROR] Name is required.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] Name is required.\n";
         return;
     }
 
     auto entry = db_.getPassword(name);
     if (!entry.has_value()) {
-        std::cout << "\n[ERROR] No password found with name '" << name << "'.\n";
-        pauseForEnter();
+        std::cout << "[ERROR] No password found: '" << name << "'.\n";
         return;
     }
 
-    std::string storedPassword;
+    std::string stored;
     try {
-        storedPassword = Crypto::decrypt(aesKey_, entry->passwordEncrypted);
+        stored = Crypto::decrypt(aesKey_, entry->passwordEncrypted);
     } catch (const std::exception& e) {
-        std::cerr << "\n[ERROR] Failed to decrypt password: " << e.what() << std::endl;
-        pauseForEnter();
+        std::cerr << "[ERROR] Decryption failed: " << e.what() << std::endl;
         return;
     }
 
-    std::string verifyPassword = readPassword(
-        "Enter the original password to verify: ");
-    if (verifyPassword != storedPassword) {
-        std::cout << "\n[ERROR] Password verification failed. Edit aborted.\n";
-        pauseForEnter();
+    std::string verify = readPassword("  Verify original password: ");
+    if (verify != stored) {
+        std::cout << "[ERROR] Password verification failed. Edit aborted.\n";
         return;
     }
 
-    std::cout << "\n[Leave blank to keep current value]\n";
+    std::cout << "  (leave blank to keep current value)\n";
 
-    std::string newDesc = readOptionalLine(
-        "New description [" + entry->description + "]: ");
-    if (newDesc.empty()) {
-        newDesc = entry->description;
-    }
+    std::string newDesc;
+    std::cout << "  Description [" << entry->description << "]: " << std::flush;
+    std::getline(std::cin, newDesc);
+    if (newDesc.empty()) newDesc = entry->description;
 
-    std::string newAccount = readOptionalLine(
-        "New account [" + entry->account + "]: ");
-    if (newAccount.empty()) {
-        newAccount = entry->account;
-    }
+    std::string newAccount;
+    std::cout << "  Account [" << entry->account << "]: " << std::flush;
+    std::getline(std::cin, newAccount);
+    if (newAccount.empty()) newAccount = entry->account;
 
     std::string newPassword;
-    std::string changePwd = readLine("Change password? (y/N): ");
+    std::string changePwd;
+    std::cout << "  Change password? (y/N): " << std::flush;
+    std::getline(std::cin, changePwd);
     if (changePwd == "y" || changePwd == "Y") {
-        std::string confirmNew;
+        std::string confirm;
         while (inputAvailable()) {
-            newPassword = readPassword("New password (input hidden): ");
+            getPasswordInput("  New password: ", newPassword);
             if (newPassword.empty()) {
-                std::cout << "[ERROR] Password cannot be empty. Using original.\n";
+                std::cout << "[ERROR] Password cannot be empty. Keeping original.\n";
                 newPassword.clear();
                 break;
             }
-            confirmNew = readPassword("Confirm new password: ");
-            if (newPassword == confirmNew) {
-                break;
-            }
-            std::cout << "[ERROR] Passwords do not match. Try again.\n\n";
+            getPasswordInput("  Confirm:      ", confirm);
+            if (newPassword == confirm) break;
+            std::cout << "[ERROR] Passwords do not match.\n\n";
         }
     }
 
@@ -826,8 +615,7 @@ void CLI::menuEdit() {
         try {
             encrypted = Crypto::encrypt(aesKey_, newPassword);
         } catch (const std::exception& e) {
-            std::cerr << "\n[ERROR] Encryption failed: " << e.what() << std::endl;
-            pauseForEnter();
+            std::cerr << "[ERROR] Encryption failed: " << e.what() << std::endl;
             return;
         }
     } else {
@@ -835,52 +623,45 @@ void CLI::menuEdit() {
     }
 
     if (db_.updatePassword(name, newDesc, newAccount, encrypted)) {
-        std::cout << "\n[OK] Password '" << name << "' updated successfully.\n";
+        std::cout << "[OK] '" << name << "' updated.\n";
     } else {
-        std::cout << "\n[ERROR] Failed to update password.\n";
+        std::cout << "[ERROR] Failed to update password.\n";
     }
-
-    pauseForEnter();
 }
 
-void CLI::menuChangeKey() {
-    printHeader();
-    std::cout << "=== Change Key File ===\n\n";
-    std::cout << "Current key file: " << keyPath_ << "\n\n";
+void CLI::cmdKey() {
+    std::cout << "  Current key: " << keyPath_ << "\n\n";
 
-    std::string newPath = readLine("Enter new key file path (empty to keep current): ");
+    std::string newPath;
+    std::cout << "  New key path (empty to cancel): " << std::flush;
+    std::getline(std::cin, newPath);
     if (newPath.empty()) {
-        std::cout << "\nKey file unchanged.\n";
-        pauseForEnter();
+        std::cout << "  Key unchanged.\n";
         return;
     }
 
     struct stat st;
     if (stat(newPath.c_str(), &st) != 0) {
-        std::string createNew = readLine(
-            "Key file does not exist. Create a new one? (y/N): ");
-        if (createNew == "y" || createNew == "Y") {
+        std::string create;
+        std::cout << "  Key file not found. Create? (y/N): " << std::flush;
+        std::getline(std::cin, create);
+        if (create == "y" || create == "Y") {
             if (Crypto::generateKeyFile(newPath)) {
-                std::cout << "\n[OK] New key file created at: " << newPath << "\n";
+                std::cout << "[OK] Key created at: " << newPath << "\n";
             } else {
-                std::cout << "\n[ERROR] Failed to create key file.\n";
-                pauseForEnter();
+                std::cout << "[ERROR] Failed to create key file.\n";
                 return;
             }
         } else {
-            std::cout << "\n[CANCELLED] Key file unchanged.\n";
-            pauseForEnter();
+            std::cout << "  Key unchanged.\n";
             return;
         }
     }
 
     if (loadKeyFile(newPath)) {
-        std::cout << "\n[OK] Key file changed successfully.\n";
+        std::cout << "[OK] Key changed.\n";
     } else {
-        if (!loadKeyFile(keyPath_)) {
-            std::cerr << "\n[FATAL] Cannot fall back to previous key file either.\n";
-        }
+        std::cerr << "[ERROR] Failed to load new key. Falling back.\n";
+        loadKeyFile(keyPath_);
     }
-
-    pauseForEnter("\nPress Enter to continue...");
 }
