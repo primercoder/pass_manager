@@ -11,6 +11,8 @@ class CLI {
 public:
     CLI(Database& db, const std::string& keyPath);
 
+    void setAssumeYes(bool yes) { assumeYes_ = yes; }
+
     void run();
 
     bool loadKeyFile();
@@ -53,6 +55,7 @@ private:
     std::string keyPath_;
     std::vector<uint8_t> aesKey_;
     bool keyLoaded_ = false;
+    bool assumeYes_ = false;
 
     void printKeyStatus();
 };

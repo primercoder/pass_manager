@@ -61,15 +61,32 @@ bool CLI::doAdd(const std::string& name,
                 const std::string& desc,
                 const std::string& account,
                 const std::string& password) {
-    if (name.empty()) {
-        std::cerr << "[ERROR] Name is required.\n";
+    std::string n = name;
+    if (n.empty()) {
+        std::cout << "Name: " << std::flush;
+        std::getline(std::cin, n);
+        if (n.empty()) {
+            std::cerr << "[ERROR] Name is required.\n";
+            return false;
+        }
+    }
+
+    auto existing = db_.getPassword(n);
+    if (existing.has_value()) {
+        std::cerr << "[ERROR] Password with name '" << n << "' already exists.\n";
         return false;
     }
 
-    auto existing = db_.getPassword(name);
-    if (existing.has_value()) {
-        std::cerr << "[ERROR] Password with name '" << name << "' already exists.\n";
-        return false;
+    std::string d = desc;
+    if (d.empty() && !assumeYes_) {
+        std::cout << "Description (optional): " << std::flush;
+        std::getline(std::cin, d);
+    }
+
+    std::string a = account;
+    if (a.empty() && !assumeYes_) {
+        std::cout << "Account (optional): " << std::flush;
+        std::getline(std::cin, a);
     }
 
     std::string pwd = password;
@@ -95,24 +112,29 @@ bool CLI::doAdd(const std::string& name,
         return false;
     }
 
-    if (!db_.addPassword(name, desc, account, encrypted)) {
+    if (!db_.addPassword(n, d, a, encrypted)) {
         std::cerr << "[ERROR] Failed to add password.\n";
         return false;
     }
 
-    std::cout << "[OK] Password '" << name << "' added.\n";
+    std::cout << "[OK] Password '" << n << "' added.\n";
     return true;
 }
 
 bool CLI::doRemove(const std::string& name, const std::string& password) {
-    if (name.empty()) {
-        std::cerr << "[ERROR] Name is required.\n";
-        return false;
+    std::string n = name;
+    if (n.empty()) {
+        std::cout << "Name: " << std::flush;
+        std::getline(std::cin, n);
+        if (n.empty()) {
+            std::cerr << "[ERROR] Name is required.\n";
+            return false;
+        }
     }
 
-    auto entry = db_.getPassword(name);
+    auto entry = db_.getPassword(n);
     if (!entry.has_value()) {
-        std::cerr << "[ERROR] No password found with name '" << name << "'.\n";
+        std::cerr << "[ERROR] No password found with name '" << n << "'.\n";
         return false;
     }
 
@@ -133,24 +155,29 @@ bool CLI::doRemove(const std::string& name, const std::string& password) {
         return false;
     }
 
-    if (!db_.removePassword(name)) {
+    if (!db_.removePassword(n)) {
         std::cerr << "[ERROR] Failed to remove password.\n";
         return false;
     }
 
-    std::cout << "[OK] Password '" << name << "' deleted.\n";
+    std::cout << "[OK] Password '" << n << "' deleted.\n";
     return true;
 }
 
 bool CLI::doShow(const std::string& name, bool reveal) {
-    if (name.empty()) {
-        std::cerr << "[ERROR] Name is required.\n";
-        return false;
+    std::string searchName = name;
+    if (searchName.empty()) {
+        std::cout << "Name: " << std::flush;
+        std::getline(std::cin, searchName);
+        if (searchName.empty()) {
+            std::cerr << "[ERROR] Name is required.\n";
+            return false;
+        }
     }
 
-    auto results = db_.searchPasswords(name);
+    auto results = db_.searchPasswords(searchName);
     if (results.empty()) {
-        std::cout << "[NOT FOUND] No password matching '" << name << "'.\n";
+        std::cout << "[NOT FOUND] No password matching '" << searchName << "'.\n";
         return false;
     }
 
@@ -210,14 +237,19 @@ bool CLI::doEdit(const std::string& name,
                  const std::string& newDesc,
                  const std::string& newAccount,
                  const std::string& newPassword) {
-    if (name.empty()) {
-        std::cerr << "[ERROR] Name is required.\n";
-        return false;
+    std::string n = name;
+    if (n.empty()) {
+        std::cout << "Name: " << std::flush;
+        std::getline(std::cin, n);
+        if (n.empty()) {
+            std::cerr << "[ERROR] Name is required.\n";
+            return false;
+        }
     }
 
-    auto entry = db_.getPassword(name);
+    auto entry = db_.getPassword(n);
     if (!entry.has_value()) {
-        std::cerr << "[ERROR] No password found with name '" << name << "'.\n";
+        std::cerr << "[ERROR] No password found with name '" << n << "'.\n";
         return false;
     }
 
@@ -238,9 +270,36 @@ bool CLI::doEdit(const std::string& name,
         return false;
     }
 
-    std::string desc = newDesc.empty() ? entry->description : newDesc;
-    std::string account = newAccount.empty() ? entry->account : newAccount;
+    std::string desc = newDesc;
+    if (desc.empty() && !assumeYes_) {
+        std::cout << "New description [" << entry->description << "]: " << std::flush;
+        std::getline(std::cin, desc);
+    }
+    if (desc.empty()) desc = entry->description;
+
+    std::string account = newAccount;
+    if (account.empty() && !assumeYes_) {
+        std::cout << "New account [" << entry->account << "]: " << std::flush;
+        std::getline(std::cin, account);
+    }
+    if (account.empty()) account = entry->account;
+
     std::string pwd = newPassword;
+    if (pwd.empty() && !assumeYes_) {
+        std::string changePwd;
+        std::cout << "Change password? (y/N): " << std::flush;
+        std::getline(std::cin, changePwd);
+        if (changePwd == "y" || changePwd == "Y") {
+            std::string confirm;
+            while (inputAvailable()) {
+                getPasswordInput("New password: ", pwd);
+                if (pwd.empty()) break;
+                getPasswordInput("Confirm:      ", confirm);
+                if (pwd == confirm) break;
+                std::cerr << "[ERROR] Passwords do not match.\n\n";
+            }
+        }
+    }
 
     std::string encrypted;
     if (!pwd.empty()) {
@@ -254,12 +313,12 @@ bool CLI::doEdit(const std::string& name,
         encrypted = entry->passwordEncrypted;
     }
 
-    if (!db_.updatePassword(name, desc, account, encrypted)) {
+    if (!db_.updatePassword(n, desc, account, encrypted)) {
         std::cerr << "[ERROR] Failed to update password.\n";
         return false;
     }
 
-    std::cout << "[OK] Password '" << name << "' updated.\n";
+    std::cout << "[OK] Password '" << n << "' updated.\n";
     return true;
 }
 

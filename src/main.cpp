@@ -40,12 +40,14 @@ static void printUsage(const char* prog) {
               << "  -p, --password <pwd>    Password (visible in shell history!)\n"
               << "  --old-password <pwd>    Old password for --edit verification\n"
               << "  --reveal                Show password in plaintext (with --show)\n"
+              << "  -y, --yes               Skip prompting for optional fields\n"
               << "\n"
               << "Missing required values will be prompted interactively.\n"
               << "\n"
               << "Examples:\n"
               << "  " << prog << " --tui\n"
               << "  " << prog << " --add -n github --desc \"GitHub\" --account user\n"
+              << "  " << prog << " --add -n github -p mypass -y\n"
               << "  " << prog << " --show -n git --reveal\n"
               << "  " << prog << " --remove -n github\n"
               << "  " << prog << " --edit -n github --desc \"Work\"\n"
@@ -68,6 +70,7 @@ struct Args {
     std::string oldPassword;
 
     bool reveal = false;
+    bool assumeYes = false;
 };
 
 static bool parseArgs(int argc, char* argv[], Args& args) {
@@ -117,6 +120,8 @@ static bool parseArgs(int argc, char* argv[], Args& args) {
             else { std::cerr << "Error: --old-password requires a value.\n"; return false; }
         } else if (a == "--reveal") {
             args.reveal = true;
+        } else if (a == "-y" || a == "--yes") {
+            args.assumeYes = true;
         } else {
             std::cerr << "Error: Unknown option: " << a << "\n";
             return false;
@@ -185,6 +190,7 @@ int main(int argc, char* argv[]) {
     }
 
     CLI cli(db, args.keyPath);
+    cli.setAssumeYes(args.assumeYes);
 
     if (!cli.loadKeyFile()) {
         db.close();
