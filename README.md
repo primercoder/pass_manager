@@ -164,37 +164,88 @@ pass_manager>
 
 ## 安全设计
 
-### 加密流程
+### 加密体系
+
+密码管理器使用 **AES-256-GCM** 认证加密模式，该模式同时提供机密性和完整性保护。
 
 ```
-密钥文件 → SHA-256 → 32 字节 AES-256 密钥
-明文密码 → 随机 12B IV → AES-256-GCM 加密 → IV+Tag+密文 → Base64 → SQLite
+                          ┌───────────────────┐
+                          │   密钥文件 (64B)    │
+                          │  /dev/urandom 生成  │
+                          └─────────┬─────────┘
+                                    │
+                              SHA-256 哈希
+                                    │
+                          ┌─────────▼─────────┐
+                          │  AES-256 密钥 (32B) │
+                          └─────────┬─────────┘
+                                    │
+   ┌────────────────────────────────┼────────────────────────────────┐
+   │                                │                                │
+   ▼                                ▼                                ▼
+┌──────────┐                 ┌──────────┐                  ┌──────────────┐
+│  明文密码  │────────────────▶│ AES-GCM  │────────────────▶│ 密文存储体    │
+│ (variable)│   随机 IV (12B)  │  加密器   │   认证标签 (16B)  │ Base64 编码    │
+└──────────┘                 └──────────┘                  └──────────────┘
 ```
 
-### 文件保护
+**加密流程详解：**
 
-- 密钥文件 `0600`，数据目录 `0700`
-- 异常权限启动时自动修复
-- 密钥和数据库均在 `.gitignore` 中排除
+1. **密钥派生**：读取密钥文件全部字节，经 SHA-256 哈希输出 32 字节固定长度密钥。此设计允许任意大小的密钥文件（推荐 64 字节随机数据），无论原始大小始终产生 256 位密钥。
+
+2. **每密码独立 IV**：每次加密操作调用 `RAND_bytes` 生成 12 字节随机初始化向量。同一密码在不同时间加密产生的密文完全不同，防止重放和模式分析。
+
+3. **GCM 认证标签**：加密同时生成 16 字节认证标签（GMAC），解密时验证标签确保密文未被篡改。任何对密文的修改都会导致解密失败。
+
+4. **存储格式**：`Base64( IV(12B) || Tag(16B) || Ciphertext )`。IV 和 Tag 无需保密，拼接后 Base64 编码存入 SQLite `password_enc` 字段。
+
+**加密 API 调用链**（OpenSSL EVP）：
+
+```
+EVP_EncryptInit_ex(EVP_aes_256_gcm)
+  → EVP_CIPHER_CTX_ctrl(SET_IVLEN, 12)
+  → EVP_EncryptInit_ex(key, iv)
+  → EVP_EncryptUpdate(plaintext)         // 输出密文
+  → EVP_EncryptFinal_ex()                // 终结
+  → EVP_CIPHER_CTX_ctrl(GET_TAG, 16)    // 获取认证标签
+```
+
+**解密 API 调用链**：
+
+```
+EVP_DecryptInit_ex(EVP_aes_256_gcm)
+  → EVP_CIPHER_CTX_ctrl(SET_IVLEN, 12)
+  → EVP_DecryptInit_ex(key, iv)
+  → EVP_DecryptUpdate(ciphertext)        // 输出明文
+  → EVP_CIPHER_CTX_ctrl(SET_TAG, 16)    // 设置期望标签
+  → EVP_DecryptFinal_ex()                // 验证标签（失败=篡改/密钥错误）
+```
+
+### 密钥文件管理
+
+| 策略 | 说明 |
+|------|------|
+| 首次生成 | 不存在时自动调用 `RAND_bytes` 生成 64 字节随机密钥写入文件 |
+| 权限保护 | 强制 `0600`（仅所有者读写），启动时检测并自动修复异常权限 |
+| 路径可配 | 默认 `~/.passmanager/default.key`，通过 `-k` 指定自定义路径 |
+| 版本控制 | `.gitignore` 中排除 `*.key`，密钥永不提交 |
 
 ### 密码输入安全
 
-- 终端隐藏回显（termios `ECHO` off）
-- 命令行模式推荐省略 `-p` 使用交互式输入，避免 shell history 泄露
-- 剪贴板通过 `popen` 管道写入，无 shell 注入风险
+- **终端隐藏回显**：`tcgetattr` + `ECHO` off，输入密码时屏幕无任何字符回显
+- **二次确认**：新增和修改密码时要求再次输入比对，防止输入错误
+- **命令行安全**：推荐省略 `-p` 使用交互式隐藏输入，避免密码出现在 `ps`、`history`、`.bash_history` 中
+- **内存管理**：密码字符串在栈上分配，函数返回后随栈帧销毁
+- **剪贴板安全**：通过 `popen` 管道直接写入 xclip/wl-copy 的 stdin，无 shell 注入风险
 
-## 数据目录
+---
 
-```
-~/.passmanager/
-├── default.key             # AES 密钥 (0600)
-└── passwords.db            # SQLite 数据库
-```
+## 数据库设计
 
-## 数据库表结构
+### 表结构
 
 ```sql
-CREATE TABLE passwords (
+CREATE TABLE IF NOT EXISTS passwords (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT    NOT NULL UNIQUE,
     description     TEXT    NOT NULL DEFAULT '',
@@ -204,3 +255,85 @@ CREATE TABLE passwords (
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 ```
+
+### 字段设计说明
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | 自增主键，内部索引，不暴露给用户 |
+| `name` | TEXT | NOT NULL UNIQUE | 密码唯一标识名，作为业务主键；UNIQUE 约束防止重复录入 |
+| `description` | TEXT | DEFAULT '' | 密码用途描述，辅助记忆出处 |
+| `account` | TEXT | DEFAULT '' | 关联账户名（如邮箱、用户名） |
+| `password_enc` | TEXT | NOT NULL | Base64 编码的密文存储体（IV + Tag + 密文） |
+| `created_at` | TEXT | DEFAULT datetime('now','localtime') | 首次录入时间，SQLite 本地时间 |
+| `updated_at` | TEXT | DEFAULT datetime('now','localtime') | 最近修改时间，UPDATE 时由应用层更新为当前时间 |
+
+### 设计原则
+
+**名称为唯一业务键**
+
+`name` 字段承担密码条目的唯一标识角色。所有操作（增删改查）均以 `name` 为定位依据：
+- 新增：先 `SELECT` 检查 UNIQUE 冲突，避免重复
+- 查询/删除/修改：以 `name` 精确匹配或 `LIKE` 模糊匹配定位目标
+
+**密文与明文分离**
+
+- 密码本体以密文形式存储在 `password_enc` 字段，通过 AES-256-GCM 加密
+- 元数据（name、description、account）以明文存储，无需加密——便于搜索和管理
+- 时间戳自动维护，`created_at` 由 SQLite `DEFAULT` 子句在 INSERT 时填充，`updated_at` 由应用在 UPDATE 时显式设置为当前时间
+
+**WAL 模式**
+
+数据库以 WAL（Write-Ahead Logging）模式打开：
+```sql
+PRAGMA journal_mode=WAL;
+```
+优势：读写并发更好，写入不阻塞读取，适合 CLI 工具频繁的查询操作。
+
+### 核心查询
+
+**新增密码**（参数化防注入）：
+```sql
+INSERT INTO passwords (name, description, account, password_enc)
+VALUES (?, ?, ?, ?);
+```
+
+**模糊搜索**（名称片段匹配）：
+```sql
+SELECT id, name, description, account, password_enc, created_at, updated_at
+FROM passwords
+WHERE name LIKE ? ESCAPE '\'
+ORDER BY name ASC;
+```
+`LIKE` 模式为 `%user_input%`，`_` 和 `%` 字面量通过 `ESCAPE '\'` 转义。
+
+**精确查找**（按名称）：
+```sql
+SELECT id, name, description, account, password_enc, created_at, updated_at
+FROM passwords
+WHERE name = ?;
+```
+
+**修改密码**（自动更新 `updated_at`）：
+```sql
+UPDATE passwords
+SET description = ?, account = ?, password_enc = ?, updated_at = datetime('now','localtime')
+WHERE name = ?;
+```
+
+**统计数量**：
+```sql
+SELECT COUNT(*) FROM passwords;
+```
+
+所有写入操作均通过 `sqlite3_prepare_v2` + `sqlite3_bind_text` 参数化查询，杜绝 SQL 注入。
+
+### 数据目录
+
+```
+~/.passmanager/
+├── default.key             # AES 密钥文件 (0600)
+└── passwords.db            # SQLite 数据库 (WAL)
+```
+
+可通过 `-k` / `-d` 参数指定不同的路径。
