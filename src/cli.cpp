@@ -166,6 +166,8 @@ bool CLI::doRemove(const std::string& name, const std::string& password) {
 
 bool CLI::doShow(const std::string& name, bool reveal) {
     std::string searchName = name;
+    bool exact = !name.empty();
+
     if (searchName.empty()) {
         std::cout << "Name: " << std::flush;
         std::getline(std::cin, searchName);
@@ -175,29 +177,63 @@ bool CLI::doShow(const std::string& name, bool reveal) {
         }
     }
 
-    auto results = db_.searchPasswords(searchName);
-    if (results.empty()) {
-        std::cout << "[NOT FOUND] No password matching '" << searchName << "'.\n";
+    PasswordEntry target;
+
+    if (exact) {
+        auto entry = db_.getPassword(searchName);
+        if (!entry.has_value()) {
+            std::cout << "[NOT FOUND] No password named '" << searchName << "'.\n";
+            return false;
+        }
+        target = entry.value();
+    } else {
+        auto results = db_.searchPasswords(searchName);
+        if (results.empty()) {
+            std::cout << "[NOT FOUND] No matches for '" << searchName << "'.\n";
+            return false;
+        }
+
+        if (results.size() == 1) {
+            target = results[0];
+        } else {
+            std::cout << "\n  " << results.size() << " matches:\n\n";
+            for (size_t i = 0; i < results.size(); ++i) {
+                std::cout << "  " << std::right << std::setw(3) << (i + 1)
+                          << ". " << std::left << std::setw(22) << results[i].name;
+                if (!results[i].account.empty()) {
+                    std::cout << "(" << results[i].account << ")";
+                }
+                std::cout << "\n";
+            }
+            std::string sel;
+            while (true) {
+                std::cout << "\n  Select (1-" << results.size() << "): " << std::flush;
+                std::getline(std::cin, sel);
+                int idx = 0;
+                try { idx = std::stoi(sel); } catch (...) { idx = 0; }
+                if (idx >= 1 && static_cast<size_t>(idx) <= results.size()) {
+                    target = results[static_cast<size_t>(idx - 1)];
+                    break;
+                }
+                std::cout << "  Invalid selection.\n";
+            }
+        }
+    }
+
+    std::string decrypted;
+    try {
+        decrypted = Crypto::decrypt(aesKey_, target.passwordEncrypted);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Decrypt failed: " << e.what() << "\n";
         return false;
     }
 
-    for (const auto& entry : results) {
-        std::string decrypted;
-        try {
-            decrypted = Crypto::decrypt(aesKey_, entry.passwordEncrypted);
-        } catch (const std::exception& e) {
-            std::cerr << "[ERROR] Decrypt failed for '" << entry.name
-                      << "': " << e.what() << "\n";
-            continue;
-        }
+    printPasswordDetail(target, decrypted, reveal);
 
-        printPasswordDetail(entry, decrypted, reveal);
-
-        if (copyToClipboard(decrypted)) {
-            std::cout << "[OK] Password copied to clipboard.\n";
-        } else {
-            std::cout << "[WARN] Clipboard not available.\n";
-        }
+    if (copyToClipboard(decrypted)) {
+        std::cout << "[OK] Password copied to clipboard.\n";
+    } else {
+        std::cout << "[WARN] Clipboard not available.\n";
     }
 
     return true;
@@ -503,26 +539,26 @@ void CLI::printPasswordDetail(const PasswordEntry& entry,
                               bool showPassword) {
     std::cout << "\n";
     std::cout << "  ┌────────────────────────────────────────┐\n";
-    std::cout << "  │ " << std::left << std::setw(40) << entry.name << "│\n";
+    std::cout << "  │ " << std::left << std::setw(38) << entry.name << " │\n";
     std::cout << "  ├────────────────────────────────────────┤\n";
     if (!entry.account.empty()) {
         std::cout << "  │ Account:  " << std::left << std::setw(28)
-                  << entry.account << "│\n";
+                  << entry.account << " │\n";
     }
     if (!entry.description.empty()) {
         std::cout << "  │ Desc:     " << std::left << std::setw(28)
-                  << entry.description << "│\n";
+                  << entry.description << " │\n";
     }
     std::cout << "  │ Created:  " << std::left << std::setw(28)
-              << entry.createdAt << "│\n";
+              << entry.createdAt << " │\n";
     std::cout << "  │ Updated:  " << std::left << std::setw(28)
-              << entry.updatedAt << "│\n";
+              << entry.updatedAt << " │\n";
     if (showPassword) {
         std::cout << "  │ Password: " << std::left << std::setw(28)
-                  << decryptedPassword << "│\n";
+                  << decryptedPassword << " │\n";
     } else {
         std::cout << "  │ Password: " << std::left << std::setw(28)
-                  << "******** (hidden)" << "│\n";
+                  << "******** (hidden)" << " │\n";
     }
     std::cout << "  └────────────────────────────────────────┘\n";
 }
@@ -548,7 +584,7 @@ void CLI::cmdShow() {
 
         std::cout << "\n  " << results.size() << " matches:\n\n";
         for (size_t i = 0; i < results.size(); ++i) {
-            std::cout << "  " << std::setw(3) << (i + 1) << ". "
+            std::cout << "  " << std::right << std::setw(3) << (i + 1) << ". "
                       << std::left << std::setw(22) << results[i].name;
             if (!results[i].account.empty()) {
                 std::cout << "(" << results[i].account << ")";
