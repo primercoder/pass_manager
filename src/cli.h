@@ -9,9 +9,26 @@
 
 class CLI {
 public:
-    CLI(Database& db, const std::string& defaultKeyPath);
+    CLI(Database& db, const std::string& keyPath);
 
     void run();
+
+    bool loadKeyFile();
+    bool loadKeyFile(const std::string& path);
+
+    bool doAdd(const std::string& name,
+               const std::string& desc,
+               const std::string& account,
+               const std::string& password);
+    bool doRemove(const std::string& name, const std::string& password);
+    bool doShow(const std::string& name, bool reveal);
+    bool doList();
+    bool doCount();
+    bool doEdit(const std::string& name,
+                const std::string& oldPassword,
+                const std::string& newDesc,
+                const std::string& newAccount,
+                const std::string& newPassword);
 
 private:
     void printHeader();
@@ -22,6 +39,9 @@ private:
     void menuList();
     void menuCount();
     void menuChangeKey();
+    void menuEdit();
+
+    std::string searchPasswordName();
 
     std::string readPassword(const std::string& prompt);
     std::string readLine(const std::string& prompt);
@@ -33,12 +53,13 @@ private:
                              const std::string& decryptedPassword,
                              bool showPassword);
 
-    Database& db_;
-    std::string defaultKeyPath_;
-    std::string currentKeyPath_;
-    std::vector<uint8_t> aesKey_;
+    std::string encryptPassword(const std::string& password);
+    std::string decryptPassword(const std::string& encrypted);
 
-    bool loadKeyFile();
-    bool loadKeyFile(const std::string& path);
+    Database& db_;
+    std::string keyPath_;
+    std::vector<uint8_t> aesKey_;
+    bool keyLoaded_ = false;
+
     void printKeyStatus();
 };
